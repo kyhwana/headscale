@@ -2,7 +2,7 @@ package headscale
 
 import (
 	"bytes"
-	"html/template"
+	"text/template"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
