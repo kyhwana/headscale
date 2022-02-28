@@ -17,7 +17,7 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/oauth2"
-	"gorm.io/gorm"
+	//"gorm.io/gorm"
 	"tailscale.com/types/key"
 )
 
@@ -299,7 +299,7 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 		log.Debug().Msg("Registering new machine after successful callback")
 
 		namespace, err := h.GetNamespace(namespaceName)
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if errors.Is(err, errNamespaceNotFound) {
 			namespace, err = h.CreateNamespace(namespaceName)
 
 			if err != nil {
