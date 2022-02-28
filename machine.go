@@ -613,6 +613,8 @@ func (machine Machine) toNode(
 	} else {
 		hostname = machine.Name
 	}
+	//HACK: having a hostname with upper case appears to break magic DNS..
+	hostname = strings.ToLower(hostname)
 
 	node := tailcfg.Node{
 		ID: tailcfg.NodeID(machine.ID), // this is the actual ID
