@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/rs/zerolog/log"
 	"github.com/tailscale/hujson"
+	"gopkg.in/yaml.v3"
 	"inet.af/netaddr"
 	"tailscale.com/tailcfg"
 )
@@ -53,16 +55,36 @@ func (h *Headscale) LoadACLPolicy(path string) error {
 		return err
 	}
 
-	ast, err := hujson.Parse(policyBytes)
-	if err != nil {
-		return err
+	switch filepath.Ext(path) {
+	case ".yml", ".yaml":
+		log.Debug().
+			Str("path", path).
+			Bytes("file", policyBytes).
+			Msg("Loading ACLs from YAML")
+
+		err := yaml.Unmarshal(policyBytes, &policy)
+		if err != nil {
+			return err
+		}
+
+		log.Trace().
+			Interface("policy", policy).
+			Msg("Loaded policy from YAML")
+
+	default:
+		ast, err := hujson.Parse(policyBytes)
+		if err != nil {
+			return err
+		}
+
+		ast.Standardize()
+		policyBytes = ast.Pack()
+		err = json.Unmarshal(policyBytes, &policy)
+		if err != nil {
+			return err
+		}
 	}
-	ast.Standardize()
-	policyBytes = ast.Pack()
-	err = json.Unmarshal(policyBytes, &policy)
-	if err != nil {
-		return err
-	}
+
 	if policy.IsZero() {
 		return errEmptyPolicy
 	}
@@ -138,7 +160,7 @@ func (h *Headscale) generateACLPolicySrcIP(
 	aclPolicy ACLPolicy,
 	u string,
 ) ([]string, error) {
-	return expandAlias(machines, aclPolicy, u)
+	return expandAlias(machines, aclPolicy, u, h.cfg.OIDC.StripEmaildomain)
 }
 
 func (h *Headscale) generateACLPolicyDestPorts(
@@ -164,7 +186,12 @@ func (h *Headscale) generateACLPolicyDestPorts(
 		alias = fmt.Sprintf("%s:%s", tokens[0], tokens[1])
 	}
 
-	expanded, err := expandAlias(machines, aclPolicy, alias)
+	expanded, err := expandAlias(
+		machines,
+		aclPolicy,
+		alias,
+		h.cfg.OIDC.StripEmaildomain,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -196,6 +223,7 @@ func expandAlias(
 	machines []Machine,
 	aclPolicy ACLPolicy,
 	alias string,
+	stripEmailDomain bool,
 ) ([]string, error) {
 	ips := []string{}
 	if alias == "*" {
@@ -203,7 +231,7 @@ func expandAlias(
 	}
 
 	if strings.HasPrefix(alias, "group:") {
-		namespaces, err := expandGroup(aclPolicy, alias)
+		namespaces, err := expandGroup(aclPolicy, alias, stripEmailDomain)
 		if err != nil {
 			return ips, err
 		}
@@ -218,7 +246,7 @@ func expandAlias(
 	}
 
 	if strings.HasPrefix(alias, "tag:") {
-		owners, err := expandTagOwners(aclPolicy, alias)
+		owners, err := expandTagOwners(aclPolicy, alias, stripEmailDomain)
 		if err != nil {
 			return ips, err
 		}
@@ -374,7 +402,11 @@ func filterMachinesByNamespace(machines []Machine, namespace string) []Machine {
 
 // expandTagOwners will return a list of namespace. An owner can be either a namespace or a group
 // a group cannot be composed of groups.
-func expandTagOwners(aclPolicy ACLPolicy, tag string) ([]string, error) {
+func expandTagOwners(
+	aclPolicy ACLPolicy,
+	tag string,
+	stripEmailDomain bool,
+) ([]string, error) {
 	var owners []string
 	ows, ok := aclPolicy.TagOwners[tag]
 	if !ok {
@@ -386,7 +418,7 @@ func expandTagOwners(aclPolicy ACLPolicy, tag string) ([]string, error) {
 	}
 	for _, owner := range ows {
 		if strings.HasPrefix(owner, "group:") {
-			gs, err := expandGroup(aclPolicy, owner)
+			gs, err := expandGroup(aclPolicy, owner, stripEmailDomain)
 			if err != nil {
 				return []string{}, err
 			}
@@ -401,8 +433,13 @@ func expandTagOwners(aclPolicy ACLPolicy, tag string) ([]string, error) {
 
 // expandGroup will return the list of namespace inside the group
 // after some validation.
-func expandGroup(aclPolicy ACLPolicy, group string) ([]string, error) {
-	groups, ok := aclPolicy.Groups[group]
+func expandGroup(
+	aclPolicy ACLPolicy,
+	group string,
+	stripEmailDomain bool,
+) ([]string, error) {
+	outGroups := []string{}
+	aclGroups, ok := aclPolicy.Groups[group]
 	if !ok {
 		return []string{}, fmt.Errorf(
 			"group %v isn't registered. %w",
@@ -410,14 +447,23 @@ func expandGroup(aclPolicy ACLPolicy, group string) ([]string, error) {
 			errInvalidGroup,
 		)
 	}
-	for _, g := range groups {
-		if strings.HasPrefix(g, "group:") {
+	for _, group := range aclGroups {
+		if strings.HasPrefix(group, "group:") {
 			return []string{}, fmt.Errorf(
 				"%w. A group cannot be composed of groups. https://tailscale.com/kb/1018/acls/#groups",
 				errInvalidGroup,
 			)
 		}
+		grp, err := NormalizeNamespaceName(group, stripEmailDomain)
+		if err != nil {
+			return []string{}, fmt.Errorf(
+				"failed to normalize group %q, err: %w",
+				group,
+				errInvalidGroup,
+			)
+		}
+		outGroups = append(outGroups, grp)
 	}
 
-	return groups, nil
+	return outGroups, nil
 }
