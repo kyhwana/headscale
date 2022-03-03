@@ -55,8 +55,8 @@ const (
 	HTTPReadTimeout    = 30 * time.Second
 	privateKeyFileMode = 0o600
 
-	requestedExpiryCacheExpiration      = time.Minute * 5
-	requestedExpiryCacheCleanupInterval = time.Minute * 10
+	registerCacheExpiration = time.Minute * 15
+	registerCacheCleanup    = time.Minute * 20
 
 	errUnsupportedDatabase                 = Error("unsupported DB")
 	errUnsupportedLetsEncryptChallengeType = Error(
@@ -72,6 +72,7 @@ const (
 type Config struct {
 	ServerURL                      string
 	Addr                           string
+	MetricsAddr                    string
 	GRPCAddr                       string
 	GRPCAllowInsecure              bool
 	EphemeralNodeInactivityTimeout time.Duration
@@ -148,11 +149,10 @@ type Headscale struct {
 
 	lastStateChange sync.Map
 
-	oidcProvider   *oidc.Provider
-	oauth2Config   *oauth2.Config
-	oidcStateCache *cache.Cache
+	oidcProvider *oidc.Provider
+	oauth2Config *oauth2.Config
 
-	requestedExpiryCache *cache.Cache
+	registrationCache *cache.Cache
 
 	ipAllocationMutex sync.Mutex
 }
@@ -202,18 +202,18 @@ func NewHeadscale(cfg Config) (*Headscale, error) {
 		return nil, errUnsupportedDatabase
 	}
 
-	requestedExpiryCache := cache.New(
-		requestedExpiryCacheExpiration,
-		requestedExpiryCacheCleanupInterval,
+	registrationCache := cache.New(
+		registerCacheExpiration,
+		registerCacheCleanup,
 	)
 
 	app := Headscale{
-		cfg:                  cfg,
-		dbType:               cfg.DBtype,
-		dbString:             dbString,
-		privateKey:           privKey,
-		aclRules:             tailcfg.FilterAllowAll, // default allowall
-		requestedExpiryCache: requestedExpiryCache,
+		cfg:               cfg,
+		dbType:            cfg.DBtype,
+		dbString:          dbString,
+		privateKey:        privKey,
+		aclRules:          tailcfg.FilterAllowAll, // default allowall
+		registrationCache: registrationCache,
 	}
 
 	err = app.initDB()
@@ -434,11 +434,17 @@ func (h *Headscale) ensureUnixSocketIsAbsent() error {
 	return os.Remove(h.cfg.UnixSocket)
 }
 
-func (h *Headscale) createRouter(grpcMux *runtime.ServeMux) *gin.Engine {
-	router := gin.Default()
+func (h *Headscale) createPrometheusRouter() *gin.Engine {
+	promRouter := gin.Default()
 
 	prometheus := ginprometheus.NewPrometheus("gin")
-	prometheus.Use(router)
+	prometheus.Use(promRouter)
+
+	return promRouter
+}
+
+func (h *Headscale) createRouter(grpcMux *runtime.ServeMux) *gin.Engine {
+	router := gin.Default()
 
 	router.GET(
 		"/health",
@@ -649,6 +655,27 @@ func (h *Headscale) Serve() error {
 
 	log.Info().
 		Msgf("listening and serving HTTP on: %s", h.cfg.Addr)
+
+	promRouter := h.createPrometheusRouter()
+
+	promHTTPServer := &http.Server{
+		Addr:         h.cfg.MetricsAddr,
+		Handler:      promRouter,
+		ReadTimeout:  HTTPReadTimeout,
+		WriteTimeout: 0,
+	}
+
+	var promHTTPListener net.Listener
+	promHTTPListener, err = net.Listen("tcp", h.cfg.MetricsAddr)
+
+	if err != nil {
+		return fmt.Errorf("failed to bind to TCP address: %w", err)
+	}
+
+	errorGroup.Go(func() error { return promHTTPServer.Serve(promHTTPListener) })
+
+	log.Info().
+		Msgf("listening and serving metrics on: %s", h.cfg.MetricsAddr)
 
 	return errorGroup.Wait()
 }

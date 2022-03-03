@@ -2,7 +2,7 @@ package headscale
 
 import (
 	"bytes"
-	"text/template"
+	"html/template"
 	"net/http"
 	textTemplate "text/template"
 
