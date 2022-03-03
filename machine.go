@@ -576,6 +576,8 @@ func (machine Machine) toNode(
 
 	hostInfo := machine.GetHostInfo()
 
+	hostInfo := machine.GetHostInfo()
+
 	node := tailcfg.Node{
 		ID: tailcfg.NodeID(machine.ID), // this is the actual ID
 		StableID: tailcfg.StableNodeID(
